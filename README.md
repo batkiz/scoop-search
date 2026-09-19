@@ -153,6 +153,9 @@ cargo fmt -- --check
 4. The Release workflow validates the tag/version, runs checks, builds Windows
    x64, and publishes `scoop-search.exe` and `SHA256SUMS`. Inspect the workflow
    result before proceeding.
+   If a tag push did not trigger Actions, run `gh workflow run release.yml
+   --repo batkiz/scoop-search --ref master -f tag=v<VERSION>` to build that
+   existing tag without moving it.
 5. Download the published assets and verify the executable's SHA256. Update
    `scoop-search.json` with the released version, URL, and verified hash; commit
    and push the manifest update. Use the published binary's hash, not a local

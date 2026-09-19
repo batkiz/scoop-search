@@ -136,6 +136,59 @@ fn missing_buckets_report_error_instead_of_panicking() {
 }
 
 #[test]
+fn installed_status_tracks_source_scope_and_version() {
+    let f = Fixture::new();
+    f.write("apps/git/current/install.json", r#"{"bucket":"main"}"#);
+    f.write("apps/git/current/manifest.json", r#"{"version":"1.0"}"#);
+    f.write(
+        "global/apps/git/current/install.json",
+        r#"{"bucket":"extras"}"#,
+    );
+    f.write(
+        "global/apps/git/current/manifest.json",
+        r#"{"version":"2.0"}"#,
+    );
+    f.write("apps/tool/current/install.json", "{}");
+    f.write("apps/tool/current/manifest.json", r#"{"version":"3.0"}"#);
+    let installed = installed::Installed::from_roots(&f.0, Some(&f.0.join("global")), false);
+    assert_eq!(installed.label("MAIN", "GIT"), " [installed: 1.0]");
+    assert_eq!(
+        installed.label("extras", "git"),
+        " [installed globally: 2.0]"
+    );
+    assert_eq!(installed.label("other", "git"), "");
+    assert_eq!(
+        installed.label("main", "tool"),
+        " [installed (source unknown): 3.0]"
+    );
+    assert_eq!(installed.label("main", "absent"), "");
+}
+
+#[test]
+fn installed_status_handles_no_junction_and_incomplete_installs() {
+    let f = Fixture::new();
+    f.write("apps/git/current/install.json", r#"{"bucket":"wrong"}"#);
+    f.write("apps/git/current/manifest.json", r#"{"version":"0"}"#);
+    f.write("apps/git/1.0/install.json", r#"{"bucket":"main"}"#);
+    f.write("apps/git/1.0/manifest.json", r#"{"version":"1.0"}"#);
+    f.write("apps/git/_2.0.old/install.json", r#"{"bucket":"wrong"}"#);
+    f.write("apps/git/_2.0.old/manifest.json", r#"{"version":"2.0"}"#);
+    f.write(
+        "apps/incomplete/current/manifest.json",
+        r#"{"version":"1.0"}"#,
+    );
+    f.write("apps/broken/current/install.json", "invalid");
+    f.write("apps/broken/current/manifest.json", r#"{"version":"1.0"}"#);
+    let installed = installed::Installed::from_roots(&f.0, None, true);
+    assert_eq!(installed.label("main", "git"), " [installed: 1.0]");
+    assert_eq!(installed.label("main", "incomplete"), "");
+    assert_eq!(installed.label("main", "broken"), "");
+    fs::remove_dir_all(f.0.join("apps/git/current")).unwrap();
+    let installed = installed::Installed::from_roots(&f.0, None, false);
+    assert_eq!(installed.label("main", "git"), " [installed: 1.0]");
+}
+
+#[test]
 fn fuzzy_search_ranks_names_aliases_and_respects_name_only() {
     let f = Fixture::new();
     f.write("buckets/main/bucket/git.json", r#"{"version":"1"}"#);

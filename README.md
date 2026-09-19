@@ -127,6 +127,25 @@ Scoop's root is resolved from `SCOOP`, then `root_path` in
 `$USERPROFILE/.config/scoop/config.json`), then `$USERPROFILE/scoop`.
 The legacy `rootPath` key is also accepted.
 
+## Installed status
+
+Search results include installed status for both ordinary and fuzzy matches:
+
+```text
+'main' bucket:
+    git (2.55.0) [installed: 2.54.0]
+    ripgrep (15.2.0) [installed globally: 15.1.0]
+```
+
+The version in parentheses is the bucket version; the marker shows the installed
+version. Status is read from Scoop's local installation records once per search.
+Packages with a known source bucket are marked only in that bucket. URL/file
+installs without a recorded bucket show `source unknown` on same-name results.
+Local and global installs can both be shown. Global discovery uses `SCOOP_GLOBAL`,
+then `global_path` in the Scoop config, then `ProgramData/scoop`. Installations
+without a `current` junction are supported, including `no_junction` mode.
+Unreadable, incomplete, or invalid records are skipped without failing search.
+
 ## Development
 
 Requires Rust 1.70 or newer. Tests use temporary fixtures and do not require a

@@ -3,6 +3,7 @@ use std::error::Error;
 mod app;
 mod bucket;
 mod fuzzy;
+mod installed;
 pub mod scoop;
 use app::App;
 use bucket::Bucket;
@@ -52,6 +53,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Args, &'sta
 
 pub fn run(scoop: &Scoop, args: &Args) -> Result<(), Box<dyn Error>> {
     let paths = Bucket::paths(scoop)?;
+    let installed = installed::Installed::load(scoop);
     // Empty queries still list everything, even with --fuzzy.
     if args.fuzzy && !args.query.is_empty() {
         let mut suggestions = Bucket::fuzzy_search(&paths, &args.query, args.exclude_bin)?;
@@ -63,7 +65,7 @@ pub fn run(scoop: &Scoop, args: &Args) -> Result<(), Box<dyn Error>> {
                 );
             }
         }
-        display_suggestions(&suggestions, false);
+        display_suggestions(&suggestions, false, &installed);
         return Ok(());
     }
     let mut buckets = Bucket::search(&paths, &args.query, args.exclude_bin)?;
@@ -78,16 +80,20 @@ pub fn run(scoop: &Scoop, args: &Args) -> Result<(), Box<dyn Error>> {
     if buckets.is_empty() {
         suggestions.extend(Bucket::fuzzy_search(&paths, &args.query, args.exclude_bin)?);
         bucket::rank_suggestions(&mut suggestions);
-        display_suggestions(&suggestions, true);
+        display_suggestions(&suggestions, true, &installed);
         return Ok(());
     }
     for bucket in buckets {
-        display_apps(&bucket.name, &bucket.apps);
+        display_apps(&bucket.name, &bucket.apps, &installed);
     }
     Ok(())
 }
 
-fn display_suggestions(suggestions: &[bucket::Suggestion], fallback: bool) {
+fn display_suggestions(
+    suggestions: &[bucket::Suggestion],
+    fallback: bool,
+    installed: &installed::Installed,
+) {
     if suggestions.is_empty() {
         println!("No matches found.");
         return;
@@ -109,20 +115,21 @@ fn display_suggestions(suggestions: &[bucket::Suggestion], fallback: bool) {
         if suggestion.remote {
             print!(" [add bucket: scoop bucket add {}]", suggestion.bucket);
         }
-        println!();
+        println!("{}", installed.label(&suggestion.bucket, &app.name));
     }
 }
 
-fn display_apps(bucket_name: &str, apps: &[App]) {
+fn display_apps(bucket_name: &str, apps: &[App], installed: &installed::Installed) {
     println!("'{}' bucket:", bucket_name);
     for app in apps {
         if app.version.is_empty() {
-            println!("    {}", app.name);
+            print!("    {}", app.name);
         } else if let Some(bin) = app.bin.first() {
-            println!("    {} ({}) --> includes '{}'", app.name, app.version, bin);
+            print!("    {} ({}) --> includes '{}'", app.name, app.version, bin);
         } else {
-            println!("    {} ({})", app.name, app.version);
+            print!("    {} ({})", app.name, app.version);
         }
+        println!("{}", installed.label(bucket_name, &app.name));
     }
     println!();
 }

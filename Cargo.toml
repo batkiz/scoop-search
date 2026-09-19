@@ -1,6 +1,6 @@
 [package]
 name = "scoop-search"
-version = "0.7.0"
+version = "0.7.1"
 authors = ["tokiedokie <42903136+tokiedokie@users.noreply.github.com>"]
 edition = "2018"
 rust-version = "1.70"

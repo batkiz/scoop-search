@@ -1,6 +1,4 @@
-use std::error::Error;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::{error::Error, fs, path::Path};
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct App {
@@ -10,133 +8,140 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(path: &PathBuf) -> App {
-        let name = App::get_name(&path).unwrap_or_default();
-        let (version, bin) = App::get_version_bin(&path).unwrap_or((String::new(), Vec::new()));
-        App { name, version, bin }
+    pub fn read(path: &Path) -> Option<Self> {
+        Self::parse(path.file_stem()?.to_str()?, &fs::read_to_string(path).ok()?)
     }
 
-    pub fn get_name(path: &PathBuf) -> Option<String> {
-        let name = path.file_stem()?.to_os_string().into_string().ok()?;
-        Some(name)
-    }
-
-    pub fn get_version_bin(path: &Path) -> Option<(String, Vec<String>)> {
-        let manufest = fs::read_to_string(&path).ok()?;
-        let manufest_json: serde_json::Value = serde_json::from_str(&manufest).ok()?;
-
-        let version: String = match manufest_json.get("version") {
-            Some(version) => version
-                .as_str()
-                .expect("version in manifest is invalid.")
-                .to_string(),
-            None => String::from(""),
+    fn parse(name: &str, content: &str) -> Option<Self> {
+        let manifest: serde_json::Value = serde_json::from_str(content).ok()?;
+        let manifest = manifest.as_object()?;
+        let version = match manifest.get("version") {
+            Some(v) => v.as_str()?.to_owned(),
+            None => String::new(),
         };
-
-        let bin: Vec<String> = match manufest_json.get("bin") {
-            Some(x) => match x.as_str() {
-                Some(bin) => vec![bin.to_string()],
-                None => match x.as_array() {
-                    Some(values) => {
-                        let mut result: Vec<String> = Vec::new();
-
-                        for value in values {
-                            match value.as_str() {
-                                Some(bin) => {
-                                    result.push(bin.to_string());
-                                }
-                                None => {
-                                    if let Some(bins) = value.as_array() {
-                                        result.extend(bins.clone().iter().map(|bin| {
-                                            match bin.as_str() {
-                                                Some(str) => str.to_string(),
-                                                None => String::new(),
-                                            }
-                                        }))
-                                    }
-                                }
-                            }
+        let mut bin = Vec::new();
+        match manifest.get("bin") {
+            Some(serde_json::Value::String(v)) => bin.push(v.clone()),
+            Some(serde_json::Value::Array(values)) => {
+                for v in values {
+                    match v {
+                        serde_json::Value::String(v) => bin.push(v.clone()),
+                        serde_json::Value::Array(v) => {
+                            // Executable and alias only, never command arguments.
+                            bin.extend(
+                                v.iter()
+                                    .take(2)
+                                    .filter_map(|v| v.as_str())
+                                    .map(str::to_owned),
+                            );
                         }
-                        result
-                    }
-                    None => Vec::new(),
-                },
-            },
-            None => Vec::new(),
-        };
-
-        Some((version, bin))
-    }
-
-    pub fn get_app_paths(bucket_path: &PathBuf) -> Option<Vec<PathBuf>> {
-        let mut path: PathBuf = PathBuf::from(bucket_path);
-
-        path.push("bucket");
-        let app_paths: Vec<PathBuf> = fs::read_dir(path)
-            .ok()?
-            .map(|path| path.unwrap().path())
-            .collect();
-
-        if app_paths.is_empty() {
-            return None;
-        }
-
-        Some(app_paths)
-    }
-
-    pub fn search_apps(apps: &Vec<App>, query: &str) -> Vec<App> {
-        let mut result: Vec<App> = Vec::new();
-
-        for app in apps {
-            if app.name.to_lowercase().contains(query) {
-                result.push(App {
-                    name: app.name.clone(),
-                    version: app.version.clone(),
-                    bin: Vec::new(),
-                });
-            } else {
-                for bin in &app.bin {
-                    let bin = Path::new(&bin)
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string();
-                    if bin.to_lowercase().contains(query) {
-                        result.push(App {
-                            name: app.name.clone(),
-                            version: app.version.clone(),
-                            bin: vec![bin],
-                        })
+                        _ => {}
                     }
                 }
             }
+            _ => {}
         }
-
-        result
+        Some(Self {
+            name: name.to_owned(),
+            version,
+            bin,
+        })
     }
 
-    pub fn search_remote_apps(remote_url: &str, query: &str) -> Result<Vec<App>, Box<dyn Error>> {
-        let response_json = ureq::get(remote_url).call().into_json()?;
+    pub fn matching(mut self, query: &str, names_only: bool) -> Option<Self> {
+        if self.name.to_lowercase().contains(query) {
+            self.bin.clear();
+            return Some(self);
+        }
+        if names_only {
+            return None;
+        }
+        self.bin = self
+            .bin
+            .into_iter()
+            .map(|bin| bin.rsplit(['/', '\\']).next().unwrap_or("").to_owned())
+            .filter(|bin| bin.to_lowercase().contains(query))
+            .collect();
+        self.bin.sort();
+        self.bin.dedup();
+        if self.bin.is_empty() {
+            None
+        } else {
+            Some(self)
+        }
+    }
 
-        let tree = response_json
+    pub fn search_remote_apps(url: &str, query: &str) -> Result<Vec<App>, Box<dyn Error>> {
+        let response = ureq::get(url)
+            .timeout_connect(5_000)
+            .timeout_read(10_000)
+            .call();
+        if response.status() != 200 {
+            return Err(format!("GitHub request failed: HTTP {}", response.status()).into());
+        }
+        Self::remote_matches(&response.into_json()?, query)
+    }
+
+    fn remote_matches(
+        response: &serde_json::Value,
+        query: &str,
+    ) -> Result<Vec<App>, Box<dyn Error>> {
+        let tree = response
             .get("tree")
-            .ok_or_else(|| Box::<dyn Error>::from("Can't get remote repository"))?;
-
-        let filtered: Vec<App> = tree
-            .as_array()
-            .ok_or_else(|| Box::<dyn Error>::from(format!("{} key `tree` is invalid", remote_url)))?
+            .and_then(|v| v.as_array())
+            .ok_or("Missing repository tree")?;
+        let mut apps: Vec<_> = tree
             .iter()
-            .map(|obj| obj["path"].as_str().unwrap_or("").to_string())
-            .filter(|path| path.ends_with(".json"))
-            .map(|path| path.trim_end_matches(".json").to_string())
-            .filter(|path| path.to_lowercase().contains(query))
+            .filter(|e| e["type"] == "blob")
+            .filter_map(|e| e["path"].as_str())
+            .filter(|p| p.starts_with("bucket/") || !p.contains('/'))
+            .filter_map(|p| p.strip_suffix(".json"))
+            .filter_map(|p| p.rsplit('/').next())
+            .filter(|name| name.to_lowercase().contains(query))
             .map(|name| App {
-                name,
+                name: name.to_owned(),
                 version: String::new(),
                 bin: Vec::new(),
             })
             .collect();
+        apps.sort_by(|a, b| a.name.cmp(&b.name));
+        apps.dedup_by(|a, b| a.name == b.name);
+        Ok(apps)
+    }
+}
 
-        Ok(filtered)
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn aliases_match_once_and_arguments_do_not_match() {
+        let app = App::parse(
+            "tool",
+            r#"{"version":"1","bin":[["dir\\FOO.exe","foo","--secret"],"other/foo.exe"]}"#,
+        )
+        .unwrap();
+        assert!(app.clone().matching("secret", false).is_none());
+        assert!(app.clone().matching("foo", true).is_none());
+        assert_eq!(app.matching("foo", false).unwrap().bin.len(), 3);
+    }
+    #[test]
+    fn invalid_manifests_do_not_panic() {
+        for content in ["invalid", "[]", r#"{"version":42}"#] {
+            assert!(App::parse("tool", content).is_none());
+        }
+    }
+    #[test]
+    fn remote_results_are_sorted_package_names() {
+        let response = serde_json::json!({"tree": [
+            {"type":"blob", "path":"bucket/git.json"},
+            {"type":"blob", "path":"scripts/git.json"},
+            {"type":"tree", "path":"fake.json"},
+            {"type":"blob", "path":"7zip.json"}
+        ]});
+        let apps = App::remote_matches(&response, "").unwrap();
+        assert_eq!(
+            apps.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
+            ["7zip", "git"]
+        );
     }
 }

@@ -1,19 +1,12 @@
-use std::env;
-use std::process;
-
-use scoop_search::scoop::Scoop;
-use scoop_search::{parse_args, run};
+use scoop_search::{parse_args, run, scoop::Scoop};
+use std::{env, process};
 
 fn main() {
-    let scoop = Scoop::new();
-
-    let args = parse_args(env::args()).unwrap_or_else(|err| {
-        eprintln!("{}", err);
-        process::exit(1);
-    });
-
-    if let Err(e) = run(&scoop, &args) {
-        eprintln!("{}", e);
+    let result = parse_args(env::args())
+        .map_err(Into::into)
+        .and_then(|args| Scoop::new().and_then(|scoop| run(&scoop, &args)));
+    if let Err(error) = result {
+        eprintln!("{}", error);
         process::exit(1);
     }
 }

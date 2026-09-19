@@ -1,8 +1,8 @@
 # scoop-search
 
-![Build](https://github.com/tokiedokie/scoop-search/workflows/Build/badge.svg)
-![GitHub release (latest by date including pre-releases)](https://img.shields.io/github/v/release/tokiedokie/scoop-search?include_prereleases)
-![GitHub All Releases](https://img.shields.io/github/downloads/tokiedokie/scoop-search/total)
+![Build](https://github.com/batkiz/scoop-search/actions/workflows/build.yml/badge.svg)
+![GitHub release](https://img.shields.io/github/v/release/batkiz/scoop-search)
+![GitHub downloads](https://img.shields.io/github/downloads/batkiz/scoop-search/total)
 
 scoop-search is a tool for a windows package manager [scoop](https://scoop.sh/)
 
@@ -13,10 +13,13 @@ scoop-search is a tool for a windows package manager [scoop](https://scoop.sh/)
 ## Installation
 
 ```sh
-scoop install https://raw.githubusercontent.com/tokiedokie/scoop-search/master/scoop-search.json
+scoop install https://raw.githubusercontent.com/batkiz/scoop-search/master/scoop-search.json
 ```
 
 ## Usage
+
+Windows x64 binaries and SHA256 checksums are also available on the
+[Releases page](https://github.com/batkiz/scoop-search/releases).
 
 ```sh
 scoop-search <query>
@@ -134,3 +137,25 @@ cargo build --release --locked
 cargo test --locked
 cargo fmt -- --check
 ```
+
+## Publishing a release
+
+1. Update the version in `Cargo.toml` and run `cargo check` to update `Cargo.lock`.
+2. Add release notes at `docs/releases/v<VERSION>.md` and commit the changes.
+3. Push the commit, then create and push its annotated tag:
+
+   ```sh
+   git push origin master
+   git tag -a v<VERSION> -m "Release v<VERSION>"
+   git push origin v<VERSION>
+   ```
+
+4. The Release workflow validates the tag/version, runs checks, builds Windows
+   x64, and publishes `scoop-search.exe` and `SHA256SUMS`. Inspect the workflow
+   result before proceeding.
+5. Download the published assets and verify the executable's SHA256. Update
+   `scoop-search.json` with the released version, URL, and verified hash; commit
+   and push the manifest update. Use the published binary's hash, not a local
+   build's hash. Release tags remain on the source commit used for the build.
+
+This fork is based on [tokiedokie/scoop-search](https://github.com/tokiedokie/scoop-search).

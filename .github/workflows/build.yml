@@ -2,19 +2,23 @@ name: Build
 
 on: [push, pull_request]
 
+permissions:
+  contents: read
+
 jobs:
-  format:
-    runs-on: windows-latest
-    steps:
-    - uses: actions/checkout@v2
-    - name: Format
-      run: cargo fmt -- --check
-    
   build:
     runs-on: windows-latest
     steps:
-    - uses: actions/checkout@v2
-    - name: Build
-      run: cargo build --verbose
-    - name: Run tests
-      run: cargo test --locked --verbose
+      - uses: actions/checkout@v7
+      - name: Set up Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          rustup default stable
+      - name: Check formatting
+        run: cargo fmt -- --check
+      - name: Test
+        run: cargo test --locked
+      - name: Lint
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Build
+        run: cargo build --release --locked

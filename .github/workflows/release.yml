@@ -2,35 +2,54 @@ name: Release
 
 on:
   push:
-    tags: 
+    tags:
       - 'v*'
+
+permissions:
+  contents: write
 
 jobs:
   release:
-
     runs-on: windows-latest
-
+    defaults:
+      run:
+        shell: pwsh
     steps:
-    - uses: actions/checkout@v2
-    - name: Build
-      run: cargo build --release
-    - name: Create Release
-      id: create_release
-      uses: actions/create-release@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        tag_name: ${{ github.ref }}
-        release_name: Release ${{ github.ref }}
-        draft: false
-        prerelease: false
-    - name: Upload Release Asset
-      id: upload-release-asset 
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ steps.create_release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps 
-        asset_path: ./target/release/scoop-search.exe
-        asset_name: scoop-search.exe
-        asset_content_type: application/octet-stream
+      - uses: actions/checkout@v7
+      - name: Set up Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          rustup default stable
+          rustup target add x86_64-pc-windows-msvc
+      - name: Verify version
+        run: |
+          $metadata = cargo metadata --no-deps --format-version 1 --locked | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $version = ($metadata.packages | Where-Object name -eq 'scoop-search').version
+          if ($env:GITHUB_REF_NAME -ne "v$version") { throw "Tag and Cargo version do not match" }
+      - name: Check formatting
+        run: cargo fmt -- --check
+      - name: Test
+        run: cargo test --locked
+      - name: Lint
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Build Windows x64
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc
+      - name: Prepare assets
+        run: |
+          New-Item -ItemType Directory -Path dist | Out-Null
+          Copy-Item target/x86_64-pc-windows-msvc/release/scoop-search.exe dist/scoop-search.exe
+          $hash = (Get-FileHash dist/scoop-search.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  scoop-search.exe" | Set-Content -Encoding ascii dist/SHA256SUMS
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $notes = "docs/releases/$env:GITHUB_REF_NAME.md"
+          $releaseArgs = @('release', 'create', $env:GITHUB_REF_NAME, '--verify-tag', '--title', $env:GITHUB_REF_NAME)
+          if (Test-Path $notes) { $releaseArgs += @('--notes-file', $notes) }
+          else { $releaseArgs += '--generate-notes' }
+          $releaseArgs += @('dist/scoop-search.exe', 'dist/SHA256SUMS')
+          & gh @releaseArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

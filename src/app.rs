@@ -1,3 +1,4 @@
+use crate::fuzzy::{Query, Score};
 use std::{error::Error, fs, path::Path};
 
 #[derive(Debug, PartialEq, Clone)]
@@ -71,7 +72,39 @@ impl App {
         }
     }
 
-    pub fn search_remote_apps(url: &str, query: &str) -> Result<Vec<App>, Box<dyn Error>> {
+    pub fn fuzzy_matching(mut self, query: &Query, names_only: bool) -> Option<(Score, Self)> {
+        let name_score = query.score(&self.name);
+        let mut bins = Vec::new();
+        if !names_only {
+            for bin in &self.bin {
+                let name = bin.rsplit(['/', '\\']).next().unwrap_or("");
+                let lower = name.to_lowercase();
+                let stem = [".exe", ".cmd", ".bat", ".ps1", ".com", ".sh"]
+                    .iter()
+                    .find_map(|ext| lower.strip_suffix(ext));
+                let score = query
+                    .score(name)
+                    .into_iter()
+                    .chain(stem.and_then(|s| query.score(s)))
+                    .min();
+                if let Some(score) = score {
+                    bins.push((score, name.to_owned()));
+                }
+            }
+        }
+        bins.sort();
+        bins.dedup();
+        let bin_score = bins.first().map(|(score, _)| *score);
+        let score = name_score.into_iter().chain(bin_score).min()?;
+        self.bin = if name_score == Some(score) {
+            Vec::new()
+        } else {
+            bins.into_iter().map(|(_, name)| name).collect()
+        };
+        Some((score, self))
+    }
+
+    pub fn remote_apps(url: &str) -> Result<Vec<App>, Box<dyn Error>> {
         let response = ureq::get(url)
             .timeout_connect(5_000)
             .timeout_read(10_000)
@@ -79,7 +112,7 @@ impl App {
         if response.status() != 200 {
             return Err(format!("GitHub request failed: HTTP {}", response.status()).into());
         }
-        Self::remote_matches(&response.into_json()?, query)
+        Self::remote_matches(&response.into_json()?, "")
     }
 
     fn remote_matches(

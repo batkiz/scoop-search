@@ -14,3 +14,6 @@ panic = 'abort'
 [dependencies]
 ureq = { version = "1.4", features = ["json"] }
 serde_json = "1.0"
+strsim = "0.11.1"
+# Use the same Unicode codepoint/lowercase handling as our literal/typo search.
+nucleo-matcher = { version = "0.3.1", default-features = false, features = ["unicode-casefold", "unicode-normalization"] }

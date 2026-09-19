@@ -44,6 +44,27 @@ fn arguments_keep_legacy_forms_and_allow_offline_name_search() {
     assert_eq!(parse(&["search"]).unwrap().query, "");
     let args = parse(&["search", "foo", "--local", "--name-only"]).unwrap();
     assert!(args.local_only && args.exclude_bin);
+    assert!(parse(&["search", "foo"]).unwrap().local_only);
+    assert!(parse(&["search", "--fuzzy", "foo"]).unwrap().local_only);
+    assert!(!parse(&["search", "--remote", "foo"]).unwrap().local_only);
+    assert!(
+        !parse(&["search", "--fuzzy", "foo", "--remote"])
+            .unwrap()
+            .local_only
+    );
+    assert!(
+        parse(&["search", "--remote", "--local", "foo"])
+            .unwrap()
+            .local_only
+    );
+    assert!(
+        !parse(&["search", "--local", "--remote", "foo"])
+            .unwrap()
+            .local_only
+    );
+    assert!(parse(&["search", "--", "--remote"]).unwrap().local_only);
+    assert!(parse(&["search", "--fuzzy", "gti"]).unwrap().fuzzy);
+    assert!(!parse(&["search", "--", "--fuzzy"]).unwrap().fuzzy);
     assert_eq!(
         parse(&["search", "--", "--literal"]).unwrap().query,
         "--literal"
@@ -112,4 +133,76 @@ fn xdg_config_resolves_without_userprofile() {
 fn missing_buckets_report_error_instead_of_panicking() {
     let f = Fixture::new();
     assert!(Bucket::paths(&f.scoop()).is_err());
+}
+
+#[test]
+fn fuzzy_search_ranks_names_aliases_and_respects_name_only() {
+    let f = Fixture::new();
+    f.write("buckets/main/bucket/git.json", r#"{"version":"1"}"#);
+    f.write("buckets/main/bucket/git-lfs.json", r#"{"version":"1"}"#);
+    f.write(
+        "buckets/extra/bucket/tool.json",
+        r#"{"version":"2","bin":[["dir/tool.exe","ripgrep","--firefox"],"ripgrep.exe"]}"#,
+    );
+    let paths = Bucket::paths(&f.scoop()).unwrap();
+    let typo = Bucket::fuzzy_search(&paths, "gti", false).unwrap();
+    assert_eq!(typo[0].app.name, "git");
+    let ranked = Bucket::fuzzy_search(&paths, "git", true).unwrap();
+    assert_eq!(ranked[0].app.name, "git");
+    assert_eq!(ranked[1].app.name, "git-lfs");
+    let alias = Bucket::fuzzy_search(&paths, "ripgrp", false).unwrap();
+    assert_eq!(alias.len(), 1);
+    assert_eq!(alias[0].app.name, "tool");
+    assert_eq!(alias[0].app.bin[0], "ripgrep");
+    let abbreviation = Bucket::fuzzy_search(&paths, "rg", false).unwrap();
+    assert_eq!(abbreviation.len(), 1);
+    assert_eq!(abbreviation[0].app.name, "tool");
+    assert!(Bucket::fuzzy_search(&paths, "rg", true).unwrap().is_empty());
+    assert!(Bucket::fuzzy_search(&paths, "ripgrp", true)
+        .unwrap()
+        .is_empty());
+    assert!(Bucket::fuzzy_search(&paths, "firefpx", false)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn fuzzy_results_have_global_limit_and_stable_ties() {
+    let f = Fixture::new();
+    for index in 0..15 {
+        f.write(
+            &format!("buckets/main/bucket/tool{:02}.json", index),
+            r#"{"version":"1"}"#,
+        );
+    }
+    let paths = Bucket::paths(&f.scoop()).unwrap();
+    let results = Bucket::fuzzy_search(&paths, "tool", false).unwrap();
+    assert_eq!(results.len(), 10);
+    assert_eq!(results[0].app.name, "tool00");
+    assert_eq!(results[9].app.name, "tool09");
+}
+
+#[test]
+fn remote_catalog_yields_literal_and_fuzzy_results_without_refetching() {
+    let apps = vec![App {
+        name: "ripgrep".into(),
+        version: String::new(),
+        bin: Vec::new(),
+    }];
+    let (literal, similar) = Bucket::remote_results(
+        "extras",
+        apps.clone(),
+        "ripgrp",
+        &fuzzy::Query::new("ripgrp"),
+    );
+    assert!(literal.apps.is_empty());
+    assert_eq!(similar.len(), 1);
+    assert!(similar[0].remote);
+    let (literal, abbreviated) =
+        Bucket::remote_results("extras", apps.clone(), "rg", &fuzzy::Query::new("rg"));
+    assert!(literal.apps.is_empty());
+    assert_eq!(abbreviated[0].app.name, "ripgrep");
+    let (literal, _) =
+        Bucket::remote_results("extras", apps, "ripgrep", &fuzzy::Query::new("ripgrep"));
+    assert_eq!(literal.apps.len(), 1);
 }

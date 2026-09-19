@@ -1,4 +1,8 @@
-use crate::{app::App, scoop::Scoop};
+use crate::{
+    app::App,
+    fuzzy::{Query, Score},
+    scoop::Scoop,
+};
 use std::{
     fs, io,
     path::{Path, PathBuf},
@@ -10,6 +14,25 @@ use std::{
 pub struct Bucket {
     pub name: String,
     pub apps: Vec<App>,
+}
+
+pub(crate) struct Suggestion {
+    pub bucket: String,
+    pub app: App,
+    pub score: Score,
+    pub remote: bool,
+}
+
+pub(crate) fn rank_suggestions(suggestions: &mut Vec<Suggestion>) {
+    suggestions.sort_by(|a, b| {
+        a.score
+            .cmp(&b.score)
+            .then_with(|| a.app.name.cmp(&b.app.name))
+            .then_with(|| a.bucket.cmp(&b.bucket))
+    });
+    let mut seen = std::collections::HashSet::new();
+    suggestions.retain(|s| seen.insert((s.bucket.clone(), s.app.name.clone())));
+    suggestions.truncate(10);
 }
 
 impl Bucket {
@@ -39,6 +62,24 @@ impl Bucket {
     }
 
     pub fn search(paths: &[PathBuf], query: &str, names_only: bool) -> io::Result<Vec<Self>> {
+        Self::search_mode(paths, query, names_only, false).map(|(buckets, _)| buckets)
+    }
+
+    pub fn fuzzy_search(
+        paths: &[PathBuf],
+        query: &str,
+        names_only: bool,
+    ) -> io::Result<Vec<Suggestion>> {
+        Self::search_mode(paths, query, names_only, true).map(|(_, suggestions)| suggestions)
+    }
+
+    fn search_mode(
+        paths: &[PathBuf],
+        query: &str,
+        names_only: bool,
+        fuzzy: bool,
+    ) -> io::Result<(Vec<Self>, Vec<Suggestion>)> {
+        let matcher = Query::new(query);
         let mut jobs = Vec::new();
         let mut buckets = Vec::new();
         for (index, path) in paths.iter().enumerate() {
@@ -57,15 +98,19 @@ impl Bucket {
                 .map_err(|e| io::Error::new(e.kind(), format!("{}: {}", dir.display(), e)))?;
             for path in manifests {
                 // Preserve the cheap filename-only mode: don't read unrelated JSON.
-                if names_only
-                    && !path
+                if names_only {
+                    let name = path
                         .file_stem()
                         .unwrap_or_default()
                         .to_string_lossy()
-                        .to_lowercase()
-                        .contains(query)
-                {
-                    continue;
+                        .to_lowercase();
+                    if if fuzzy {
+                        matcher.score(&name).is_none()
+                    } else {
+                        !name.contains(query)
+                    } {
+                        continue;
+                    }
                 }
                 jobs.push((index, path));
             }
@@ -85,10 +130,14 @@ impl Bucket {
                             let Some((bucket, path)) = jobs.get(index) else {
                                 break;
                             };
-                            if let Some(app) =
-                                App::read(path).and_then(|a| a.matching(query, names_only))
-                            {
-                                matches.push((*bucket, app));
+                            if let Some((score, app)) = App::read(path).and_then(|a| {
+                                if fuzzy {
+                                    a.fuzzy_matching(&matcher, names_only)
+                                } else {
+                                    a.matching(query, names_only).map(|a| (Score::default(), a))
+                                }
+                            }) {
+                                matches.push((*bucket, score, app));
                             }
                         }
                         matches
@@ -100,7 +149,17 @@ impl Bucket {
                 .flat_map(|h| h.join().expect("search worker panicked"))
                 .collect::<Vec<_>>()
         });
-        for (index, app) in matches {
+        let mut suggestions = Vec::new();
+        for (index, score, app) in matches {
+            if fuzzy {
+                suggestions.push(Suggestion {
+                    bucket: buckets[index].name.clone(),
+                    app,
+                    score,
+                    remote: false,
+                });
+                continue;
+            }
             buckets[index].apps.push(app);
         }
         for bucket in &mut buckets {
@@ -108,10 +167,12 @@ impl Bucket {
         }
         buckets.retain(|b| !b.apps.is_empty());
         buckets.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(buckets)
+        rank_suggestions(&mut suggestions);
+        Ok((buckets, suggestions))
     }
 
-    pub fn remote(scoop: &Scoop, paths: &[PathBuf], query: &str) -> Vec<Self> {
+    pub fn remote(scoop: &Scoop, paths: &[PathBuf], query: &str) -> (Vec<Self>, Vec<Suggestion>) {
+        let matcher = Query::new(query);
         let file = scoop
             .dir
             .join("apps")
@@ -123,9 +184,10 @@ impl Bucket {
             .and_then(|s| serde_json::from_str(&s).ok())
         {
             Some(map) => map,
-            None => return Vec::new(),
+            None => return (Vec::new(), Vec::new()),
         };
         let mut buckets = Vec::new();
+        let mut suggestions = Vec::new();
         for (name, url) in map {
             if paths
                 .iter()
@@ -147,9 +209,14 @@ impl Bucket {
                 "https://api.github.com/repos/{}/git/trees/HEAD?recursive=1",
                 repo
             );
-            match App::search_remote_apps(&url, query) {
-                Ok(apps) if !apps.is_empty() => buckets.push(Self { name, apps }),
-                Ok(_) => {}
+            match App::remote_apps(&url) {
+                Ok(apps) => {
+                    let (bucket, mut similar) = Self::remote_results(&name, apps, query, &matcher);
+                    if !bucket.apps.is_empty() {
+                        buckets.push(bucket);
+                    }
+                    suggestions.append(&mut similar);
+                }
                 Err(error) => eprintln!(
                     "Warning: could not search remote bucket '{}': {}",
                     name, error
@@ -157,6 +224,34 @@ impl Bucket {
             }
         }
         buckets.sort_by(|a, b| a.name.cmp(&b.name));
-        buckets
+        rank_suggestions(&mut suggestions);
+        (buckets, suggestions)
+    }
+
+    pub(crate) fn remote_results(
+        name: &str,
+        apps: Vec<App>,
+        query: &str,
+        matcher: &Query,
+    ) -> (Self, Vec<Suggestion>) {
+        let mut bucket = Self {
+            name: name.to_owned(),
+            apps: Vec::new(),
+        };
+        let mut suggestions = Vec::new();
+        for app in apps {
+            if let Some(matched) = app.clone().matching(query, true) {
+                bucket.apps.push(matched);
+            }
+            if let Some((score, app)) = app.fuzzy_matching(matcher, true) {
+                suggestions.push(Suggestion {
+                    bucket: name.to_owned(),
+                    app,
+                    score,
+                    remote: true,
+                });
+            }
+        }
+        (bucket, suggestions)
     }
 }
